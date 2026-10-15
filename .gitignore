@@ -1,0 +1,20 @@
+# ROS 2 / colcon
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+
+# Recorded data never belongs in the repo
+*.db3
+*.mcap
+*.pgm
+*.posegraph
+*.data
+
+# Editor / tool state
+.vscode/
+.claude/
+*.swp

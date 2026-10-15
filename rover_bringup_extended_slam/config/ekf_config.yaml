@@ -1,0 +1,111 @@
+
+# ekf_config.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# robot_localization Extended Kalman Filter configuration
+# Fuses: wheel encoder odometry (partial) + BNO085 IMU (9-DoF, on the ESP32-S3)
+# Used by: ros2 launch rover_bringup ekf.launch.py
+#
+# State vector: [x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw,
+#                ax, ay, az]
+#
+# NOTE on partial encoders: We inflate odom covariance in arduino_encoder_twist_bridge.py
+# (velocity-gated vyaw covariance) so the EKF trusts IMU yaw rate over wheel-derived
+# yaw during turns, when skid-steer wheels slip.
+# ─────────────────────────────────────────────────────────────────────────────
+
+ekf_node:
+  ros__parameters:
+    # 30 Hz EKF: compromise between pose-freshness at scan time and CPU budget
+    # on the Jetson.  50 Hz missed its deadline (~33 ms per cycle measured in
+    # 2026-04-24 run log: "Failed to meet update rate"), which backed up the
+    # measurement queue and competed with slam_toolbox's Ceres solver — the
+    # map→odom update arrived late and manifested as visible scan drift in
+    # RViz.  30 Hz still betters the original 20 Hz (33 ms vs 50 ms pose
+    # staleness at scan time) without overloading the CPU.
+    frequency: 30.0
+    sensor_timeout: 0.1
+    two_d_mode: true          # Ground robot — ignore Z, roll, pitch
+    transform_time_offset: 0.0
+    transform_timeout: 0.0
+    print_diagnostics: true
+    debug: false
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom          # Use odom as world frame (no GPS)
+
+    # ── Odometry source: arduino bridge (twist-only — bridge publishes no pose) ─
+    # vyaw is fused, but the bridge inflates its covariance dynamically based
+    # on |cmd_w|.  At small commanded ω (straight motion, SLAM arcs ≤ 0.06 rad/s)
+    # the wheels don't slip and wheel-derived yaw rate is trusted normally.
+    # At larger commanded ω (nav2 path turns, recovery spins) the covariance
+    # is inflated by ~5000× so the EKF effectively ignores the biased wheel
+    # yaw and rides on IMU + slam_toolbox scan matching.  See
+    # arduino_encoder_twist_bridge.py params: vyaw_fusion_gate, vyaw_cov_inflated.
+    odom0: /wheel/odom_twist
+    odom0_config: [false, false, false,   # x, y, z   — no pose from bridge
+                   false, false, false,   # roll, pitch, yaw
+                   true,  false, false,   # vx        — wheel linear vel always reliable
+                   false, false, true,    # vyaw      — fused w/ velocity-gated covariance
+                   false, false, false]   # ax, ay, az
+    odom0_queue_size: 5
+    odom0_nodelay: false
+    odom0_differential: false
+    odom0_relative: false
+    odom0_twist_rejection_threshold: 2.0
+
+    # ── IMU source: BNO085 (9-DoF, mounted on the ESP32-S3) ──────────────────
+    # Firmware streams "IMU …" lines over USB serial → arduino_encoder_twist_bridge
+    # republishes as sensor_msgs/Imu on /imu/data → zupt_node zeroes gyro bias when
+    # stationary → /imu/filtered (this EKF's input).
+    imu0: /imu/filtered
+    imu0_config: [false, false, false,   # x, y, z  (don't use position from IMU)
+                  false, false, true,    # roll, pitch, YAW ENABLED (2026-07): BNO085 game rotation vector is a FUSED, accel-corrected attitude — NOT raw integrated gyro — so it gives a stable short-term heading. imu0_relative (below) re-zeros its arbitrary start datum. Roll/pitch stay off (two_d_mode zeroes them anyway). HYPOTHESIS under test for skid-steer drift — A/B against `false` during drift work. Heading trust = imu_orient_cov (bridge param, 0.01 rad² ≈ 5.7° std, conservative; tighten for more authority).
+                  false, false, false,   # vx, vy, vz
+                  false, false, true,    # vroll, vpitch, vyaw (yaw rate — fused alongside absolute yaw above; standard IMU config)
+                  false, false, false]   # ax, ay, az — still OFF. Gravity double-subtract is now fixed (see below) so accel is safe to enable as a MEASURED drift-phase experiment; not turned on yet.
+    imu0_queue_size: 10
+    imu0_nodelay: false
+    imu0_differential: false
+    imu0_relative: true         # BNO085 game-rotation-vector yaw has no magnetometer → no absolute heading datum
+    # BNO085 SH2_LINEAR_ACCELERATION is ALREADY gravity-removed by the chip's fusion
+    # engine (verified on hardware 2026-07-16: all axes ≈ 0 at rest).  Removing gravity
+    # AGAIN here would inject a phantom ~9.81 m/s² and cause position runaway the moment
+    # accel fusion (ax/ay in imu0_config) is turned on.  Keep false for this sensor.
+    imu0_remove_gravitational_acceleration: false
+    imu0_pose_rejection_threshold: 3.0
+    imu0_twist_rejection_threshold: 1.5
+    imu0_linear_acceleration_rejection_threshold: 3.0
+
+     # ── Visual odometry: cuVSLAM pose ─────────────────────────────────────────
+   # odom1: /visual_slam/tracking/odometry
+   # odom1_config: [true,  true,  false,
+   #                false, false, true,
+   #                false, false, false,
+   #                false, false, false,
+   #                false, false, false]
+   # odom1_queue_size: 5
+   # odom1_nodelay: false
+   # odom1_differential: false
+   # odom1_relative: false
+   # odom1_pose_rejection_threshold: 0.5
+
+
+    # ── Process noise covariance Q ────────────────────────────────────────────
+    # Increase diagonal values if the filter is too slow to track reality
+    process_noise_covariance: [0.05, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.05, 0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.06, 0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.03, 0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.03, 0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.03, 0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.025, 0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.025, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.04, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.01, 0.0,    0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.01, 0.0,    0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.03, 0.0,    0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.01, 0.0,    0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.01, 0.0,
+                               0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,     0.0,     0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.015]

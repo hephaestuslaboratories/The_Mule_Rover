@@ -1,0 +1,787 @@
+# nav2_params.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Nav2 navigation stack parameters tuned for:
+#   - Differential drive / skid-steer rover
+#   - A1M8 2D LiDAR (12m range, /scan topic)
+#   - Partial encoder odometry fused with IMU via EKF
+# ─────────────────────────────────────────────────────────────────────────────
+
+amcl:
+  ros__parameters:
+    use_sim_time: false
+    # Motion model noise (DifferentialMotionModel expects 4 alphas).
+    # Lower values than before — encoder odometry on this rover is reasonable,
+    # so tell AMCL to trust it.  alpha1/2 = rotation noise from rotation/translation,
+    # alpha3/4 = translation noise from translation/rotation.
+    alpha1: 0.2
+    alpha2: 0.2
+    alpha3: 0.2
+    alpha4: 0.2
+    alpha5: 0.2   # unused for DifferentialMotionModel, kept for parity
+    base_frame_id: "base_link"
+    beam_skip_distance: 0.5
+    beam_skip_error_threshold: 0.9
+    beam_skip_threshold: 0.3
+    do_beamskip: false
+    global_frame_id: "map"
+    lambda_short: 0.1
+    laser_likelihood_max_dist: 2.0
+    laser_max_range: 12.0         # A1M8 max range
+    laser_min_range: 0.15
+    laser_model_type: "likelihood_field"
+    max_beams: 180                # was 60 — give AMCL more beams to match against
+    max_particles: 2000
+    min_particles: 500
+    odom_frame_id: "odom"
+    pf_err: 0.05
+    pf_z: 0.99
+    recovery_alpha_fast: 0.0
+    recovery_alpha_slow: 0.0
+    resample_interval: 1
+    # The rover is differential-drive (left/right wheels, no strafe).
+    # OmniMotionModel would inject fictitious lateral-motion noise and
+    # prevent the particle filter from converging.
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+    save_pose_rate: 0.5
+    sigma_hit: 0.2
+    tf_broadcast: true
+    transform_tolerance: 1.0
+    # Run scan-match updates often so map→odom tracks reality.
+    # 25 cm / 0.2 rad was way too loose; scan visibly drifted between updates.
+    update_min_a: 0.1             # was 0.2
+    update_min_d: 0.05            # was 0.25
+    # Beam-mixture weights: let "hit" (scan endpoint matches map) dominate,
+    # keep a small "rand" floor for unexpected obstacles (people, chairs).
+    z_hit: 0.7                    # was 0.5
+    z_max: 0.05
+    z_rand: 0.2                   # was 0.5
+    z_short: 0.05
+    scan_topic: /scan_filtered
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: false
+    global_frame: map
+    robot_base_frame: base_link
+    odom_topic: /odometry/filtered  # EKF output
+    bt_loop_duration: 100
+    default_server_timeout: 20
+    wait_for_service_timeout: 1000
+    action_server_result_timeout: 900.0
+    # ── BT selection ─────────────────────────────────────────────────────────
+    # HUMBLE uses default_nav_to_pose_bt_xml / default_nav_through_poses_bt_xml.
+    # The `navigators:` list with per-navigator `plugin:` + `bt_xml_filename:`
+    # is IRON/JAZZY syntax — Humble never declares those params, so it silently
+    # ignored them and loaded its own built-in tree instead.
+    #
+    # Proved from /behavior_tree_log: the stock RoundRobin fires
+    # Spin/Wait/BackUp once each per cycle, and the bags showed exactly
+    # 3/3/3 and 2/2/1.  Our tree backs up TWICE per cycle, so BackUp would
+    # have outnumbered Spin ~2:1.  It never did -> our tree was never loaded,
+    # which is also why /plan_smoothed had zero messages in every run.
+    default_nav_to_pose_bt_xml: "/workspaces/isaac_ros-dev/install/rover_bringup_extended_slam/share/rover_bringup_extended_slam/config/navigate_w_smoothing_and_recovery.xml"
+    default_nav_through_poses_bt_xml: "/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml"
+    # Kept so this file still works if the stack is ever moved to Iron+.
+    # Harmless on Humble (undeclared params are ignored).
+    navigators: ["navigate_to_pose", "navigate_through_poses"]
+    navigate_to_pose:
+      plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
+      bt_xml_filename: "/workspaces/isaac_ros-dev/install/rover_bringup_extended_slam/share/rover_bringup_extended_slam/config/navigate_w_smoothing_and_recovery.xml"
+    navigate_through_poses:
+      plugin: "nav2_bt_navigator::NavigateThroughPosesNavigator"
+      bt_xml_filename: "/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml"
+    error_code_names:
+      - compute_path_error_code
+      - follow_path_error_code
+
+controller_server:
+  ros__parameters:
+    use_sim_time: false
+    # 10.0 -> 20.0 -> 15.0, all on 2026-08-18.
+    #
+    # 20.0 (Nav2's default) was too much: nav_20260818_214634 showed /tf falling
+    # 79.6 -> 47.4 Hz, a transformPose "extrapolation into the future"
+    # exception, odom->base_link steps to 0.500 m, and rotate-without-
+    # translating tripling 7.3% -> 19.8% as the controller steered off a pose
+    # that kept jumping under it.
+    #
+    # NOT because the controller could not keep up — it hit its rate fine
+    # (2522 /cmd_vel_nav over 131 s of goal execution = 19.3 Hz).  It is
+    # CONTENTION: the controller took enough CPU that slam_toolbox's 50 Hz TF
+    # publisher lost out.  Contention scales smoothly, so 15 Hz (1.5x the 10 Hz
+    # baseline rather than 2x) is a real middle ground, not a coin flip.
+    #
+    # At 0.32 m/s: 10 Hz = 3.2 cm per control cycle, 15 Hz = 2.1 cm, and
+    # use_collision_detection re-evaluates the carrot arc once per cycle.
+    #
+    # WATCH /tf.  Healthy is ~79.6 Hz.  If it sags toward 60 or transformPose
+    # exceptions reappear, go back to 10.0 — that value is proven good at this
+    # cruise speed.  This is the second contention finding after the 0.03
+    # costmap test; TF starvation is how this Jetson tells you it is full.
+    controller_frequency: 15.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.5
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 3.0
+    progress_checker_plugins: ["progress_checker"]
+    goal_checker_plugins: ["general_goal_checker"]
+    controller_plugins: ["FollowPath"]
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      # Skid-steer rovers wobble on approach — especially during reverse
+      # driving where pure-pursuit's lookahead collapses onto the goal and
+      # produces oscillatory ω commands.  3 cm in 20 s accepts the wobble
+      # as progress while still catching true wedges against obstacles.
+      required_movement_radius: 0.03
+      movement_time_allowance: 20.0
+    general_goal_checker:
+      stateful: true
+      plugin: "nav2_controller::SimpleGoalChecker"
+      # Relaxed from 0.25/0.25.  Indoor skid-steer can't consistently hold
+      # a 14° heading or 25 cm position near goal under pure-pursuit reverse
+      # driving.  35 cm / 30° is still "in the right spot" for household
+      # navigation while letting the goal checker actually declare success
+      # before the progress checker aborts the approach.
+      xy_goal_tolerance: 0.35
+      yaw_goal_tolerance: 0.13
+    FollowPath:
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      # 0.28 -> 0.32 (2026-08-18).  nav_20260818_211928 spent 23.7% of driving
+      # time pinned at 0.28, and the commanded-vs-actual check showed no
+      # drivetrain saturation (actual p99 0.327 against a 0.280 command cap).
+      # Gian confirms the drivetrain goes well past 0.30 and wants 0.40 as the
+      # indoor ceiling, so there is room above this.  Stepping to 0.32 rather
+      # than straight to 0.40 because lookahead_time and curvature_lookahead_dist
+      # changed in the same round — a moderate step keeps the wobble result
+      # readable.  MUST move together with velocity_smoother.max_velocity[0],
+      # which silently clipped this once already.
+      desired_linear_vel: 0.32           # m/s -- indoor ceiling is 0.40
+      lookahead_dist: 0.4
+      # Raised from 0.3 to reduce pure-pursuit oscillation near goal.  With
+      # a small min lookahead, the carrot collapses onto the goal when
+      # within ~30 cm, and tiny heading errors produce large ω commands —
+      # the rover ends up wobbling in place instead of settling.  0.4 keeps
+      # the lookahead pulling the rover through its final approach instead
+      # of chasing a point it's already close to.
+      min_lookahead_dist: 0.40
+      max_lookahead_dist: 0.90
+      # 2.2 -> 3.0 (2026-08-18) to damp pure-pursuit oscillation at the higher
+      # cruise speed.  nav_20260818_211928 showed wobble rising 1.02 -> 1.39
+      # flips/m as mean speed went 0.198 -> 0.224: 37 reversals in 119 s of
+      # driving is a ~6.4 s oscillation period, far too slow to be a control-
+      # rate problem (10 Hz gives ~64 samples per cycle).  It is the classic
+      # symptom of a lookahead point that is too near for the speed — the rover
+      # over-corrects toward it, overshoots, and corrects back.
+      #
+      # Self-limiting: lookahead = speed * lookahead_time, clamped to
+      # max_lookahead_dist 0.90.  At 0.32 m/s this saturates at 0.90 m; at
+      # 0.20 m/s it is still only 0.60 m, so tight spaces stay tight.
+      # Do NOT chase this further by raising max_lookahead_dist — that cuts
+      # corners wider and is how doorways get clipped.
+      lookahead_time: 3.0
+      rotate_to_heading_angular_vel: 0.4     # rad/s rotation speed when aligning with path
+      transform_tolerance: 0.1
+      use_velocity_scaled_lookahead_dist: true
+      min_approach_linear_velocity: 0.05
+      approach_velocity_scaling_dist: 0.6
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 0.30
+      use_regulated_linear_velocity_scaling: true
+      use_fixed_curvature_lookahead: false
+      # 0.25 -> 0.40 (2026-08-18).  This is the distance ahead used to measure
+      # path curvature for speed regulation — i.e. how early the rover notices
+      # a corner is coming.  At 0.25 m and 0.32 m/s that is 0.78 s of warning,
+      # so it brakes DURING the corner instead of before it, which both wobbles
+      # and feels lurchy.  0.40 m gives ~1.25 s at cruise.
+      curvature_lookahead_dist: 0.40
+      use_cost_regulated_linear_velocity_scaling: true
+      regulated_linear_scaling_min_radius: 0.5
+      # 0.15 -> 0.20 on 2026-08-18, from the speed profile of nav_20260818_145427:
+      # 43.9% of all driving time sat below 0.165 m/s and the single largest bin
+      # (24.2%) was pinned exactly on this floor, while only 4.4% ever reached
+      # desired_linear_vel.  The cap was never the constraint — this was.
+      #
+      # Second benefit: in a tight corner at v=0.15, w=0.30 the INNER wheel runs
+      # 0.15 - 0.30*0.185 = 0.094 m/s = ~15 RPM, which is low-duty PWM territory
+      # and the source of the clicking Gian heard.  0.20 puts it at ~23 RPM.
+      #
+      # THIS TRADES AGAINST CLEARANCE — it is the floor that cost regulation is
+      # not allowed to push below, so the rover now passes obstacles faster.
+      # After changing it, re-check `clearance p05` and `returns inside
+      # footprint` in bag_analyze.py.  If body hits come back above zero, this
+      # went too far.
+      regulated_linear_scaling_min_speed: 0.20
+      # ── RPP's MODEL OF THE INFLATION LAYER — added 2026-08-18 ───────────────
+      # These were never set, so they used Nav2's defaults (3.0 and 0.6), which
+      # do NOT describe this costmap (2.0 and 0.50).  That matters because RPP
+      # does not read the costmap geometry — it INVERTS the inflation formula
+      # from the cell cost to recover "how far am I from an obstacle":
+      #
+      #   d_est = (-1 / inflation_cost_scaling_factor) * ln(cost / 252) + r_inscribed
+      #
+      # Invert with 3.0 what was written with 2.0 and the answer comes out
+      # short: at a true 0.50 m it believed 0.40 m.  It then divided by
+      # cost_scaling_dist 0.6 instead of 0.50, so speed was scaled to 0.67x at
+      # a distance where the intended scaling is 1.0x (no reduction at all).
+      #
+      # Net effect: a systematic ~1.5x over-braking everywhere near an
+      # obstacle.  The speed profile of nav_20260818_210454 showed 49.8% of
+      # driving time pinned on the regulation floor because of it.
+      #
+      # Fixing this does NOT relax a safety margin — it makes RPP's picture of
+      # the costmap correct instead of pessimistic.  The designed behaviour
+      # (linear falloff to 50% at half the inflation radius) is unchanged.
+      #
+      # IF inflation_layer.cost_scaling_factor OR inflation_radius EVER CHANGE,
+      # THESE TWO MUST CHANGE WITH THEM.
+      inflation_cost_scaling_factor: 2.0   # == inflation_layer.cost_scaling_factor
+      cost_scaling_dist: 0.50              # == inflation_layer.inflation_radius
+      cost_scaling_gain: 1.0
+      # NOTE: use_rotate_to_heading=true with AMCL on a noisy map caused the
+      # particle filter to diverge — in-place rotations are pathological for
+      # scan matching.  Keep the controller as a pure path-follower (no in-place
+      # spins during following) and accept that the final heading is the path's
+      # last-segment direction, not the goal yaw.  If exact goal heading
+      # becomes important later, add a RotationShimController wrapper rather
+      # than enabling in-place rotations here.
+      use_rotate_to_heading: true
+      allow_reversing: false
+      # 0.8 -> 0.52 rad (46 deg -> 30 deg), 2026-08-19.  THE DOORWAY FIX.
+      #
+      # This is the heading error at which RPP stops driving and pivots in place
+      # to face the path, instead of arcing toward it while still moving.
+      #
+      # WHY: the rover wedged at the same coordinates run after run — 1.97/-1.17,
+      # 2.32/-2.12, 2.51/-2.27, 6.477/-1.336 — repeated to six decimal places,
+      # ALWAYS with the path at -0.77 to -1.00 rad (~45-57 deg).  A 0.68 x 0.42 m
+      # footprint entering a gap on the diagonal needs ~0.77 m of clear width;
+      # square-on it needs 0.42 m.  Same doorway, same rover — the whole
+      # difference is the approach angle.  At 0.8 rad the threshold sat right on
+      # top of the angles it was actually failing at, so it never squared up.
+      #
+      # RESULT (nav_20260819_203831 vs nav_20260819_201428):
+      #   recovery activations      4 -> 0
+      #   Controller patience exc.  7 -> 0
+      #   time to goal          70.1 -> 56.4 s
+      #   clearance p05        0.066 -> 0.089 m
+      #   wobble                1.31 -> 1.23 flips/m
+      # Rotate-without-translating rose 12.4% -> 14.7%: that IS the mechanism,
+      # and the pauses cost far less time than the wedges did.
+      #
+      # DO NOT lower further without watching map->odom corrections — more
+      # in-place rotation is harder on scan matching, and two corrections at
+      # ~0.26 m / 4 deg already showed up in that run.  0.40 (23 deg) is the
+      # next step down if a tighter gap ever demands it.
+      rotate_to_heading_min_angle: 0.52
+      max_angular_accel: 2.5
+      max_robot_pose_search_dist: 10.0
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 10.0
+      # 2.0 -> 5.0 (2026-08-19).  The costmap UPDATES at 10 Hz but was only
+      # PUBLISHED at 2 Hz, and everything outside controller_server sees it only
+      # via the topic — behavior_server's collision checker most importantly.
+      # At 0.25 m/s that made every Spin/BackUp collision decision act on data up
+      # to 12.5 cm stale, which is a lot when the margin at a doorway is a few
+      # centimetres.  3x3 m at 0.05 = 3600 cells, so republishing is cheap.
+      # 5.0 -> 10.0 (2026-09-25).  behavior_server and anything else that reads
+      # the costmap TOPIC (rather than the object) was acting on data up to
+      # 200 ms old; at 0.32 m/s that is 6 cm of staleness on every Spin/BackUp
+      # collision check.  3x3 m at 0.05 = 3600 cells, so republishing is cheap.
+      publish_frequency: 10.0
+      global_frame: odom
+      robot_base_frame: base_link
+      use_sim_time: false
+      rolling_window: true
+      width: 3
+      height: 3
+      resolution: 0.05
+      # Rover URDF is 0.30 × 0.29 m → circumscribed radius ≈ 0.21 m.
+      # 0.27 adds ~6 cm padding for thin/dark obstacles the 2D LiDAR may
+      # miss on a given scan (desk legs, chair posts, cable bundles).
+      #robot_radius: 0.27
+      footprint: "[[0.24, 0.2025], [0.24, -0.2025], [-0.44, -0.2025], [-0.44, 0.2025]]"
+      footprint_padding: 0.01
+      # Use ObstacleLayer (2D) instead of VoxelLayer (3D) — the only sensor
+      # feeding the local costmap is the 2D A1M8 LiDAR, so a 2D layer is the
+      # correct tool.  VoxelLayer was wasting 15 unused z-slices and
+      # retaining marks more aggressively than ObstacleLayer, which made
+      # phantom obstacles linger.  Switch back to VoxelLayer only if/when a
+      # 3D depth source is added.
+      # range_layer sits BETWEEN obstacle_layer and inflation_layer ON PURPOSE.
+      # Layers run in order, so ToF marks land in the same grid as LiDAR marks
+      # and are then inflated by the SAME inflation_radius/cost_scaling_factor.
+      # That is what makes the belt honour the identical clearance envelope the
+      # controller already respects — no second set of numbers to keep in sync.
+      # Put it AFTER inflation_layer and its marks would never be inflated at
+      # all: the rover would clip low obstacles it can see perfectly well.
+      plugins: ["obstacle_layer", "range_layer", "inflation_layer"]
+      # ── ToF safety belt → costmap ───────────────────────────────────────────
+      # Five sensors.  /tof/down is DELIBERATELY ABSENT: it points at the floor
+      # and always has a target, so feeding it here would mark a permanent
+      # phantom obstacle ~0.39 m ahead that nothing can ever clear.  It goes
+      # through its own filter node instead (see config/tof_belt.yaml).
+      #
+      # /tof/down_obstacle is the FILTERED down-looker, from tof_down_filter —
+      # never the raw /tof/down, which always sees the floor.  It arrives on a
+      # flat frame with the hit point already projected onto the floor plane.
+      #
+      # GLOBAL COSTMAP: deliberately NOT added there.  ToF marks are transient
+      # and cone-shaped; letting them into the global costmap would bake them
+      # into path planning over the whole map, and a phantom would persist far
+      # longer.  Revisit only after the local layer has proven itself.
+      range_layer:
+        plugin: "nav2_costmap_2d::RangeSensorLayer"
+        enabled: true
+        topics: ["/tof/front_left", "/tof/front_right",
+                 "/tof/corner_left", "/tof/corner_right",
+                 "/tof/rear", "/tof/down_obstacle"]
+        # ALL = decide per message whether the reading is a fixed beam or a
+        # cone, from the message's own min_range/max_range.  Ours are cones.
+        input_sensor_type: ALL
+        # THE ANTI-PHANTOM SWITCH, AND THE WHOLE REASON THE NODE PUBLISHES
+        # max_range WHEN IT SEES NOTHING.  A reading at max_range clears the
+        # cone.  Without this, the only thing that could erase a ToF mark would
+        # be another ToF mark — the LiDAR cannot clear what a ToF cone marks
+        # (a sock on the floor is invisible to a 0.56 m scan plane), so marks
+        # would accumulate forever and the rover would slowly wall itself in.
+        clear_on_max_reading: true
+        # Probabilistic, not binary: each reading nudges a cell's probability.
+        # Marks at >= 0.8, clears at <= 0.2.  A single spurious reading cannot
+        # create a lethal cell, and a single lucky one cannot erase a real
+        # obstacle — which matters because these sensors see ~2 cm objects and
+        # will occasionally catch a carpet fibre.
+        # 0.8 -> 0.6 and 0.2 -> 0.05 (2026-09-25), both for LATENCY and MEMORY.
+        # mark_threshold is how much evidence before a cell becomes lethal: at
+        # 0.8 it took several consistent readings, ~200 ms of travel before the
+        # rover reacted.  0.6 reacts sooner; the cost is that one spurious
+        # reading marks more easily.
+        # clear_threshold is how easily a mark is erased.  0.2 wiped an object
+        # the moment it dropped out of the cone — which is exactly what happens
+        # as the rover closes in, since the cone rises above short objects
+        # (a 6 cm object is invisible inside 0.3 m).  That is why it stopped,
+        # crept forward and tapped the box.  0.05 makes marks persist through
+        # the final approach.
+        mark_threshold: 0.6
+        clear_threshold: 0.05
+        # 0.0 disables the stale-data warning.  Left off ON PURPOSE: when a
+        # sensor faults, tof_belt_node stops publishing that topic and reports
+        # it on /rover/tof_status.  We do NOT want Nav2 also deciding the whole
+        # layer is stale because one of five sensors went quiet.
+        no_readings_timeout: 0.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        # Lower factor = gentler falloff (cost spreads further out),
+        # which biases the controller to hug the centre of corridors
+        # instead of scraping walls.
+        cost_scaling_factor: 2.0
+        # 0.40 -> 0.50 A/B'd 2026-08-18 on a fixed route, and 0.50 won on every
+        # axis that matters: recovery activations 9 -> 0, LiDAR returns landing
+        # inside the footprint 9 -> 0, failed goals 1 -> 0, clearance p05
+        # 0.068 -> 0.092 m, wobble 1.30 -> 1.21 flips/m.  Cost was ~11% on
+        # time-to-goal, repaid in wall clock by not wedging.
+        #
+        # WHY 0.40 WAS WRONG: the rear footprint corners sweep
+        # sqrt(0.44^2 + 0.2025^2) = 0.484 m from base_link.  NavFn is
+        # orientation-blind and only avoids cells that carry cost, so with a
+        # 0.40 m band it routed paths averaging 0.425 m from lethal cells —
+        # inside the envelope the back end actually occupies.  0.50 pushes
+        # that mean to 0.471 m.  MUST STAY >= 0.484 in spirit.
+        inflation_radius: 0.50
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan
+        # Clear the rover's own footprint every update so self-marks
+        # (chassis reflecting its own rays, transient noise inside the
+        # body) never persist as obstacles.
+        footprint_clearing_enabled: true
+        scan:
+          topic: /scan_filtered
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+          # 6 m > 2 m: rays clear stale cells much further out, so phantom
+          # obstacles from older scans get wiped as soon as a current ray
+          # passes through them instead of living forever.
+          raytrace_max_range: 6.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 5.5
+          obstacle_min_range: 0.0
+          # Treat "inf" / "no obstacle" returns as confirmation that the
+          # ray's path is clear all the way to max_range.  Without this,
+          # the costmap never uses the "I see nothing" signal — which is
+          # most of what a LiDAR publishes in an open room.
+          inf_is_valid: true
+      # MUST STAY true.  Reverted 2026-08-16 after it broke every recovery.
+      #
+      # It was briefly set false to avoid re-serialising the grid on every
+      # publish.  The reasoning was "only RViz subscribes to
+      # /local_costmap/costmap".  That missed behavior_server, which subscribes
+      # to local_costmap/costmap_raw — same publisher, same flag — and in Humble
+      # nav2_costmap_2d::CostmapSubscriber handles ONLY full costmap messages,
+      # not the incremental *_updates topic.
+      #
+      # Result: behavior_server got one costmap at startup and never another.
+      # Its 3x3 m window stayed frozen at the start pose, so the moment the
+      # rover was anywhere else its own footprint fell outside that stale grid
+      # -> "Pose Goes Off Grid." -> scored as a collision -> spin, backup and
+      # drive_on_heading all aborted instantly.  With recovery dead, a single
+      # "collision ahead" latched permanently instead of clearing.
+      always_send_full_costmap: true
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      # Was 0.5 Hz (2 s between updates) — too slow; rover would wait
+      # a full second or more to "see" that a phantom obstacle had
+      # cleared after the LiDAR stopped seeing it.  2 Hz is still cheap
+      # CPU-wise for a 141×193 cell map.
+      # 2.0 -> 3.0 (2026-08-19).  Must keep up with the BT's replan rate, which
+      # went 1 Hz -> 2 Hz: replanning on a costmap that has not changed since the
+      # last plan just burns CPU producing the same path.  Not raised further —
+      # this is the EXPENSIVE one (362 x 323 cells vs the local costmap's 60 x
+      # 60), and it is the first thing to revert if /tf sags below ~79 Hz.
+      # 3.0 -> 4.0 (2026-09-25).  Raised to match the BT's replan rate, which
+      # went 2 -> 4 Hz for the ToF belt: replanning faster than this costmap
+      # updates just re-plans on identical data.
+      # THIS IS STILL THE EXPENSIVE ONE (362 x 323 cells vs the local costmap's
+      # 60 x 60) and the first thing to revert if /tf sags below ~79 Hz.
+      update_frequency: 4.0
+      publish_frequency: 1.0
+      global_frame: map
+      robot_base_frame: base_link
+      use_sim_time: false
+      # MUST match local_costmap.robot_radius — if this is smaller, the
+      # planner plans paths the controller can't execute and the rover
+      # ends up in collision-ahead loops.  Both are 0.27 now.
+      #robot_radius: 0.23
+      footprint: "[[0.24, 0.2025], [0.24, -0.2025], [-0.44, -0.2025], [-0.44, 0.2025]]"
+      footprint_padding: 0.01
+      resolution: 0.025
+      track_unknown_space: true
+      # range_layer is here as well as in the local costmap, and it has to be:
+      # NavFn plans on THIS costmap.  With the belt only in the local costmap
+      # the planner could not see a low obstacle at all, so it kept routing
+      # straight through it while the controller refused to drive the path —
+      # stop, recover, replan the same path, repeat, abort.  The belt could
+      # only ever stop the rover, never route it around anything, which is not
+      # what a safety belt is for.
+      #
+      # THE TRADE, stated plainly: this costmap has no rolling window, so a ToF
+      # mark placed here survives until a ToF cone looks at that spot again and
+      # reports clear — which may be never, if the rover does not pass that way
+      # a second time.  A phantom mark therefore costs more here than it does
+      # locally.  That is acceptable ONLY because the belt reads clean (caps
+      # verified against the floor, no stuck values, corners confirmed).
+      # If phantoms ever do accumulate, the escape hatch is:
+      #     ros2 service call /global_costmap/clear_entirely_global_costmap \
+      #         nav2_msgs/srv/ClearEntireCostmap
+      plugins: ["static_layer", "obstacle_layer", "range_layer", "inflation_layer"]
+      range_layer:
+        plugin: "nav2_costmap_2d::RangeSensorLayer"
+        enabled: true
+        # Same five sensors as the local costmap.  /tof/down is excluded here
+        # for the same reason: it always sees the floor.
+        topics: ["/tof/front_left", "/tof/front_right",
+                 "/tof/corner_left", "/tof/corner_right",
+                 "/tof/rear"]
+        input_sensor_type: ALL
+        clear_on_max_reading: true
+        # 0.8 -> 0.6 and 0.2 -> 0.05 (2026-09-25), both for LATENCY and MEMORY.
+        # mark_threshold is how much evidence before a cell becomes lethal: at
+        # 0.8 it took several consistent readings, ~200 ms of travel before the
+        # rover reacted.  0.6 reacts sooner; the cost is that one spurious
+        # reading marks more easily.
+        # clear_threshold is how easily a mark is erased.  0.2 wiped an object
+        # the moment it dropped out of the cone — which is exactly what happens
+        # as the rover closes in, since the cone rises above short objects
+        # (a 6 cm object is invisible inside 0.3 m).  That is why it stopped,
+        # crept forward and tapped the box.  0.05 makes marks persist through
+        # the final approach.
+        mark_threshold: 0.6
+        clear_threshold: 0.05
+        no_readings_timeout: 0.0
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan
+        footprint_clearing_enabled: true
+        scan:
+          topic: /scan_filtered
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+          # Match local costmap ranges — unified clearing behaviour.
+          # Raising from 2 m → 6 m means rays clear stale cells over the
+          # whole 10 m map, not just in a narrow bubble around the rover.
+          raytrace_max_range: 6.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 5.5
+          obstacle_min_range: 0.0
+          inf_is_valid: true
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: true
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        # Match local costmap so planner and controller see the same world.
+        cost_scaling_factor: 2.0
+        # 0.40 -> 0.50 A/B'd 2026-08-18 on a fixed route, and 0.50 won on every
+        # axis that matters: recovery activations 9 -> 0, LiDAR returns landing
+        # inside the footprint 9 -> 0, failed goals 1 -> 0, clearance p05
+        # 0.068 -> 0.092 m, wobble 1.30 -> 1.21 flips/m.  Cost was ~11% on
+        # time-to-goal, repaid in wall clock by not wedging.
+        #
+        # WHY 0.40 WAS WRONG: the rear footprint corners sweep
+        # sqrt(0.44^2 + 0.2025^2) = 0.484 m from base_link.  NavFn is
+        # orientation-blind and only avoids cells that carry cost, so with a
+        # 0.40 m band it routed paths averaging 0.425 m from lethal cells —
+        # inside the envelope the back end actually occupies.  0.50 pushes
+        # that mean to 0.471 m.  MUST STAY >= 0.484 in spirit.
+        inflation_radius: 0.50
+      # LEFT AT true ON PURPOSE (2026-08-15).  random_patrol subscribes to
+      # /global_costmap/costmap ONLY — it has no /costmap_updates subscription
+      # — so switching this to false would leave it planning goals against a
+      # frozen first-frame map.  explore_lite does subscribe to both and would
+      # be fine, but patrol would silently break.  Revisit only after
+      # random_patrol learns to consume update messages.
+      always_send_full_costmap: true
+
+map_server:
+  ros__parameters:
+    use_sim_time: false
+    yaml_filename: ""   # set at launch time
+
+map_saver:
+  ros__parameters:
+    use_sim_time: false
+    save_map_timeout: 5.0
+    free_thresh_default: 0.25
+    occupied_thresh_default: 0.65
+    map_subscribe_transient_local: true
+
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 2.0
+    use_sim_time: false
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_navfn_planner/NavfnPlanner"
+      tolerance: 0.5
+      use_astar: false
+      allow_unknown: true
+
+smoother_server:
+  ros__parameters:
+    use_sim_time: false
+    smoother_plugins: ["simple_smoother"]
+    simple_smoother:
+      plugin: "nav2_smoother::SimpleSmoother"
+      # TUNED DOWN 2026-08-18.  First run with the smoother actually loaded
+      # showed SmoothPath FAILING 80 of 97 plans, every one logged as
+      # "Smoothed path leads to a collision".  Navigation was unaffected (the
+      # BT's Fallback/AlwaysSuccess kept the raw path) but smoothing delivered
+      # essentially nothing while still burning CPU on every replan.
+      #
+      # Cause: tolerance 1e-10 with max_its 1000 and refinement runs the
+      # gradient descent until it has barely moved between iterations — a very
+      # long way from the planner's output.  The smoothed path then cuts
+      # corners into LETHAL cells (the check is against real obstacles, not
+      # inflation, so raising inflation_radius does NOT make this stricter).
+      #
+      # Converge sooner and stay nearer the planned path.  If the rejection
+      # rate is still high, raise w_data further — it is the fidelity term.
+      tolerance: 1.0e-6
+      max_its: 200
+      do_refinement: true
+      refinement_num: 1        # was defaulting to 2
+      # TRIED 0.4 on 2026-08-19, REVERTED: rejections went 36 -> 38 (no help) and
+      # clearance p05 dropped 0.070 -> 0.048.  Higher fidelity means hugging
+      # NavFn's path more closely, and NavFn routes along the inflation boundary
+      # — so more fidelity bought worse clearance for nothing.
+      #
+      # The rejections are NOT a smoothing-strength problem.  They repeat at the
+      # SAME coordinates to six decimal places (1.9668/-1.1730, 2.3168/-2.1230,
+      # 6.4773/-1.3363, 8.0658/-0.8817) with the rover at ~45 deg (theta -0.77
+      # to -1.00 rad).  A 0.68 x 0.405 m footprint at 45 deg needs ~0.77 m of
+      # width; those spots do not have it.  No smoother parameter fixes geometry.
+      w_data: 0.3              # fidelity to the original path (default 0.2)
+      w_smooth: 0.25           # smoothing pull (default 0.3)
+
+behavior_server:
+  ros__parameters:
+    cycle_frequency: 10.0
+    # spin RESTORED 2026-04-27.  Removing it broke bt_navigator activation:
+    # the default Humble navigate_through_poses_w_replanning_and_recovery.xml
+    # references <Spin> nodes in its recovery branch, so removing the plugin
+    # caused "Action server spin not available" → BT load fail → entire nav
+    # stack aborted bringup → 2D Goal Pose silently dropped.
+    #
+    # The original concern (spin cascading into "Collision Ahead - Exiting
+    # Spin" indoors) is mitigated by max_rotational_vel/simulate_ahead_time
+    # below — when spin can't safely execute it aborts cleanly and the BT
+    # falls through to backup → drive_on_heading.  That's working as
+    # designed; it's preferable to nav not running at all.
+    #
+    # If cascading recovery failures resurface, the proper fix is a custom
+    # BT XML that omits the Spin node, NOT removing the plugin entry.
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "assisted_teleop", "wait"]
+    spin:
+      plugin: "nav2_behaviors/Spin"
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors/DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors/Wait"
+    assisted_teleop:
+      plugin: "nav2_behaviors/AssistedTeleop"
+    # ── THE RECOVERY BUG, FIXED 2026-08-18 ───────────────────────────────────
+    # Humble's behavior_server has exactly ONE frame parameter, `global_frame`,
+    # and its default is `odom`.  It is the frame the robot pose is looked up
+    # in AND the frame the collision checker expects the costmap to be in — and
+    # that costmap is the LOCAL costmap, which is published in odom.
+    #
+    # This was set to `map` (Iron/Jazzy splits the param into local_frame +
+    # global_frame; Humble does not).  So every Spin/BackUp looked the pose up
+    # in map and tested it against an odom-framed grid.  The two differ by the
+    # whole map->odom transform — over 1 m the moment an initial pose is set.
+    # Once that exceeds 1.5 m (half the 3x3 m window) EVERY pose check fails:
+    #
+    #   Pose Goes Off Grid. -> Spin FAILED -> BackUp FAILED -> only Wait left
+    #
+    # 100% of recoveries failed in every bag that ever triggered one.  It was
+    # never a costmap staleness problem, so the always_send_full_costmap revert
+    # could not have fixed it.  Verify with: ros2 param list /behavior_server
+    global_frame: odom
+    robot_base_frame: base_link
+    # Humble spelling.  Values match Humble's own defaults; stated explicitly
+    # so the next person does not have to know that.
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    transform_tolerance: 0.1
+    # Iron/Jazzy spellings — undeclared and IGNORED on Humble.  Kept, grouped,
+    # and labelled so a future distro upgrade does not silently regress this
+    # block.  Do not add params here without checking `ros2 param list` first:
+    # believing an ignored param was in effect is what caused the recovery bug.
+    local_frame: odom
+    local_costmap_topic: local_costmap/costmap_raw
+    global_costmap_topic: global_costmap/costmap_raw
+    local_footprint_topic: local_costmap/published_footprint
+    global_footprint_topic: global_costmap/published_footprint
+    use_sim_time: false
+    # Was 2.0 — far too conservative at the default behavior speeds
+    # (0.025 m/s backup, 0.4 rad/s spin).  At 2 s simulate-ahead with
+    # inflation 0.45 m, any rover near an obstacle sees "collision ahead"
+    # for every recovery behavior and all of them abort, stranding the
+    # rover in tight spots exactly when recovery matters most.
+    simulate_ahead_time: 0.5
+    # Recovery spin velocity.  Skid-steer + 2D scan-matching localization
+    # cannot cleanly track the default 1.0 rad/s (57°/s) — the map display
+    # smears and the pose estimate jumps during spins.  0.30 rad/s matches
+    # the broad-arc regime that the SLAM init uses; localization stays rigid.
+    # Minimum raised proportionally so the controller still reaches floor speed.
+    max_rotational_vel: 0.30
+    min_rotational_vel: 0.30
+    # Accel lim halved so the spin ramps in/out smoothly instead of stepping.
+    rotational_acc_lim: 1.5
+
+waypoint_follower:
+  ros__parameters:
+    use_sim_time: false
+    loop_rate: 20
+    stop_on_failure: false
+    waypoint_task_executor_plugin: "wait_at_waypoint"
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      enabled: true
+      waypoint_pause_duration: 200
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: false
+    smoothing_frequency: 20.0
+    scale_velocities: false
+    feedback: "OPEN_LOOP"
+    # Angular velocity capped at 0.30 rad/s (17°/s).  Matches the SLAM-arc
+    # regime — at this rate the rover tracks cleanly, the IMU stays within
+    # its linear response range, and slam_toolbox scan matching stays rigid.
+    # Previously 0.8 rad/s allowed nav2 pure-pursuit to command turns faster
+    # than the skid-steer could execute without slipping, producing phantom
+    # obstacles in the costmap from scans stamped at drifted poses.
+    # lin 0.25 -> 0.28 (2026-08-18): it was silently clipping the controller.
+    # FollowPath.desired_linear_vel is 0.28, so the smoother was shaving the top
+    # off every command the controller ever issued at full speed — two configs
+    # disagreeing about the same number.  Still POLICY, not a firmware limit.
+    # ang 0.28 KEPT — documented SLAM-arc tuning above, do NOT raise to chase
+    # speed without re-checking map->odom jump count; 0.8 rad/s previously
+    # produced phantom obstacles from scans stamped at drifted poses.
+    max_velocity: [0.32, 0.0, 0.28]
+    min_velocity: [-0.21, 0.0, -0.28]   # reverse capped to match forward for tile traction symmetry (was -0.5; restore -0.5 if Nav2 backup recovery feels too slow)
+    # ── accel/decel aligned to firmware (2026-07) ──────────────────────────────
+    # LINEAR 0.8 / -0.8 now match firmware MAX_LIN_ACCEL (the slewToward ramp is
+    # symmetric at 0.8 m/s²).  THIS is the fix: Nav2 previously planned 1.8 accel /
+    # 2.2 decel — ~2.3–2.8× harder than the firmware ramp physically delivers — so
+    # every planned stop overshot by ~3.6 cm.  ANGULAR left at 1.5 (already below
+    # firmware's MAX_ANG_ACCEL 3.0 = the safe direction; Nav2 asks for less than the
+    # wheels can do, so no over-planning).  Not lowered to 0.5 — that's stricter than
+    # needed and just makes turns sluggish.
+    # TODO(calibration): re-set all four to the linear acceleration actually MEASURED
+    # on tile once calibration produces it; firmware and Nav2 must carry the same number.
+    max_accel: [0.8, 0.0, 1.5]
+    max_decel: [-0.8, 0.0, -1.5]
+    odom_topic: "odometry/filtered"
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0
+
+explore:
+  ros__parameters:
+    # Topic remap — explore_lite defaults to "costmap" (resolves to /costmap).
+    # Nav2 publishes the global costmap on /global_costmap/costmap, so without
+    # these overrides explore_lite waits forever for a costmap that never comes.
+    # /global_costmap/costmap -> /map (2026-08-19).  Frontier search BFSes
+    # through cells of value FREE_SPACE (exactly 0) looking for ones adjacent to
+    # NO_INFORMATION.  The Nav2 global costmap is the wrong input for that on
+    # two counts:
+    #   1. INFLATION.  inflation_radius 0.50 with cost_scaling_factor 2.0 paints
+    #      non-zero cost over most of an indoor room, so almost nothing reads as
+    #      FREE_SPACE.  That is literally what the first attempt reported:
+    #      "[FrontierSearch] Could not find nearby clear cell to start search".
+    #   2. RAYTRACE CLEARING.  obstacle_layer has inf_is_valid: true and
+    #      raytrace_max_range 6.0, so max-range returns actively convert unknown
+    #      cells to free out to 6 m — erasing the very boundary being searched
+    #      for.
+    # slam_toolbox's raw /map has neither: free is 0, walls are 100, and
+    # anything not yet observed stays -1.  Same nav_msgs/OccupancyGrid type, so
+    # explore_lite's costmap client reads it unchanged.  Nav2 still does the
+    # obstacle avoidance when executing the goal — explore only needs to pick
+    # WHERE to go, not how to get there safely.
+    costmap_topic: "/map"
+    # slam_toolbox publishes no incremental update topic; it republishes the
+    # full map every map_update_interval (2.0 s), which is plenty.  Left
+    # pointing at a topic that never publishes — explore_lite treats updates as
+    # optional.
+    costmap_updates_topic: "/map_updates"
+    # Goal replan rate.  2.0 Hz preempted Nav2 goals every ~500ms so
+    # nothing ever completed.  0.33 Hz (3 s between replans) lets each
+    # frontier goal actually reach the controller and attempt motion.
+    planner_frequency: 0.33
+    # Abandon a frontier if no progress for 30 s — prevents getting
+    # stuck retrying the same unreachable wall corner forever.
+    progress_timeout: 30.0
+    potential_scale: 1e-2
+    orientation_scale: 0.0
+    gain_scale: 1e-1
+    # Larger frontiers force explore_lite to pick "real" unexplored regions
+    # rather than every tiny edge artifact, which is what makes it send
+    # the rover to wall-hugging goals it can't physically reach.
+    min_frontier_size: 0.2
+    robot_base_frame: "base_link"
+    transform_tolerance: 0.1
+    visualize: true

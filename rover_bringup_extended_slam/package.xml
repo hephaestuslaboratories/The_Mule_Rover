@@ -1,0 +1,48 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>rover_bringup_extended_slam</name>
+  <version>0.0.2</version>
+  <description>Autonomous rover bringup package (C++ nodes)</description>
+  <maintainer email="put-your-email-here@example.com">Gian</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- ── C++ node dependencies ────────────────────────────────────────────── -->
+  <depend>rclcpp</depend>
+  <depend>rclcpp_action</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>nav2_msgs</depend>
+  <depend>slam_toolbox</depend>
+
+  <!-- ── Runtime packages launched by rover_bringup.launch.py ─────────────── -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>rplidar_ros</exec_depend>
+  <exec_depend>robot_localization</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <!-- slam_toolbox is already a <depend> above (build + exec).  Listing it
+       again as exec_depend is a catkin_pkg error, not a warning. -->
+  <exec_depend>nav2_map_server</exec_depend>
+  <!-- Frontier exploration, launched only when use_exploration:=true.  NOT a
+       ROS distro package — it comes from robo-friends/m-explore-ros2 and has to
+       be cloned into the workspace and built.  Declared here because
+       rover_bringup.launch.py references it; if it is missing the launch fails
+       only when use_exploration is true, which is why this went unnoticed. -->
+  <exec_depend>explore_lite</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

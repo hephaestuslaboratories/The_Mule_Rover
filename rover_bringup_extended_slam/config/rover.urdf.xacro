@@ -1,0 +1,285 @@
+<?xml version="1.0"?>
+<!--
+  rover.urdf.xacro
+  ─────────────────────────────────────────────────────────────────────────────
+  Differential-drive rover (2026-05-22 chassis revision):
+    - 3601 Series Rhino 120 mm drive wheels (center-drive, 2 motors)
+    - 4 swivel casters at the corners (passive support, not in URDF kinematics)
+    - A1M8 2D LiDAR on a forward-right mast (cable forward — see LiDAR joint)
+    - BNO085 IMU mounted on chassis top deck, near the drive-axle center
+
+  CHASSIS DIMENSIONS (NEW)
+    base_width   = 0.315 m (31.5 cm)
+    base_length  = 0.62  m (62 cm)
+    drive axle is 0.21 m from front (longitudinally offset from chassis center).
+    base_link is conventionally at the DRIVE AXLE midpoint on the floor.
+
+  IMU PLACEMENT (measured 2026-05-22)
+    27.94 cm from front  → 27.94 − 21.0 = 6.94 cm behind drive axle
+                          → x = -0.0694 m in base_link
+    Centered laterally   → y = 0
+    17.145 cm from floor → z = +0.17145 m
+
+    IMU orientation is reported in chip frame — the bridge node applies any
+    axis remap via ROS params (axis_x_src/sgn etc.).
+  ─────────────────────────────────────────────────────────────────────────────
+-->
+<robot name="rover" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- ── Parameters (NEW CHASSIS) ─────────────────────────────────────────── -->
+  <xacro:property name="base_width"   value="0.315"/>   <!-- 31.5 cm -->
+  <xacro:property name="base_length"  value="0.62"/>    <!-- 62 cm -->
+  <xacro:property name="base_height"  value="0.10"/>
+  <xacro:property name="wheel_radius" value="0.060"/>   <!-- 3601 Rhino 120 mm dia ÷ 2 = 60 mm -->
+  <xacro:property name="wheel_width"  value="0.045"/>   <!-- approx; tune to actual hub width -->
+  <xacro:property name="track_width"  value="0.37"/>    <!-- drive-axle center-to-center -->
+
+  <!-- Drive-axle longitudinal offset from CHASSIS center.
+       Chassis center is at base_length/2 from each end → 31 cm from front.
+       Drive axle is at 21 cm from front → the AXLE sits 10 cm FORWARD of the
+       chassis centre, so the chassis centre is 10 cm BEHIND base_link.
+       The body box is drawn at x = -0.10, giving a chassis spanning
+       -0.41 (rear) .. +0.21 (front) — matching the real rover and the Nav2
+       footprint polygon.
+       FIXED 2026-08: was +0.10, which drew the chassis MIRRORED (0.41 m of
+       phantom body in FRONT of the rover, only 0.21 m behind).  Cosmetic
+       only — Nav2 uses the `footprint` param, not this box — but it made
+       RViz useless as a measuring instrument. -->
+  <xacro:property name="body_offset_x" value="-0.10"/>
+
+  <!-- LiDAR / IMU placements (relative to base_link) -->
+  <xacro:property name="lidar_x"      value="-0.335"/>    <!-- 33.5 cm BEHIND drive axle (mast center, measured) -->
+  <xacro:property name="lidar_y"      value="0.0127"/>    <!-- 1.27 cm LEFT of centre, measured (NOT dead centre) -->
+  <!-- Mount yaw correction, radians (+CCW).  Measured 2026-08 with
+       tools/lidar_cal.py against a flat wall: the wall read +1.16° off square,
+       so -0.0202 rad cancels it.
+       PROVISIONAL: that test cannot separate "sensor tilted on its mast" from
+       "rover parked 1.16° crooked".  Confirm first — wall-to-hub distances
+       left vs right should be EQUAL (a 7.5 mm difference over the 37 cm track
+       IS 1.16°, i.e. parking error), or repeat lidar_cal.py at 2-3 different
+       walls and check the value is reproducible.  If it was parking error,
+       set this back to 0.0.  Re-run lidar_cal.py after any change: tilt
+       should read ~0. -->
+  <xacro:property name="lidar_yaw"    value="-0.0202"/>   <!-- -1.16°, provisional -->
+  <xacro:property name="lidar_height" value="0.50"/>    <!-- 0.56 m floor→scan − 0.06 base_link height = 0.50 (confirmed) -->
+
+  <xacro:property name="imu_x"        value="-0.0694"/> <!-- 6.94 cm BEHIND drive axle -->
+  <xacro:property name="imu_y"        value="0.0"/>     <!-- centered laterally -->
+  <xacro:property name="imu_z"        value="0.11145"/> <!-- 17.145 cm above floor -->
+
+  <!-- ── Base footprint (ground plane) ────────────────────────────────────── -->
+  <link name="base_footprint"/>
+
+  <joint name="base_footprint_to_base" type="fixed">
+    <parent link="base_footprint"/>
+    <child  link="base_link"/>
+    <!-- base_link is at drive-axle height (= wheel_radius), positioned at the
+         drive-axle midpoint on the floor.  X/Y of the joint stay zero. -->
+    <origin xyz="0 0 ${wheel_radius}" rpy="0 0 0"/>
+  </joint>
+
+  <link name="base_link">
+    <visual>
+      <!-- Chassis body shifted forward by body_offset_x so it's drawn around
+           its actual position relative to the drive axle. -->
+      <origin xyz="${body_offset_x} 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="${base_length} ${base_width} ${base_height}"/>
+      </geometry>
+      <material name="grey"><color rgba="0.5 0.5 0.5 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="${body_offset_x} 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="${base_length} ${base_width} ${base_height}"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="4.0"/>
+      <inertia ixx="0.05" ixy="0" ixz="0" iyy="0.10" iyz="0" izz="0.12"/>
+    </inertial>
+  </link>
+
+  <!-- ── Drive wheels (2, centered on base_link X=0) ──────────────────────── -->
+  <xacro:macro name="drive_wheel" params="name y">
+    <link name="${name}_wheel">
+      <visual>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+        <material name="black"><color rgba="0.1 0.1 0.1 1.0"/></material>
+      </visual>
+      <collision>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+      </collision>
+      <inertial>
+        <mass value="0.5"/>
+        <inertia ixx="0.0006" ixy="0" ixz="0" iyy="0.0006" iyz="0" izz="0.0010"/>
+      </inertial>
+    </link>
+    <joint name="${name}_wheel_joint" type="continuous">
+      <parent link="base_link"/>
+      <child  link="${name}_wheel"/>
+      <!-- Wheel sits AT the drive axle (X=0), at the track-width offset. -->
+      <origin xyz="0 ${y} 0" rpy="${pi/2} 0 0"/>
+      <axis xyz="0 0 1"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:drive_wheel name="left_drive"  y=" ${track_width/2}"/>
+  <xacro:drive_wheel name="right_drive" y="-${track_width/2}"/>
+
+  <!-- ── Caster outlines (visual only — passive, no kinematics) ───────────── -->
+  <!-- Approximate: 4 corner casters on a 62×31.5 cm body, inset 5 cm from the
+       outer edges of the chassis.  Tune positions to match physical mounts. -->
+  <xacro:macro name="caster_marker" params="name x y">
+    <link name="${name}_caster"/>
+    <joint name="${name}_caster_joint" type="fixed">
+      <parent link="base_link"/>
+      <child  link="${name}_caster"/>
+      <origin xyz="${x} ${y} ${-wheel_radius + 0.04}" rpy="0 0 0"/>
+    </joint>
+  </xacro:macro>
+  <!-- FIXED 2026-08: these were at +0.36 / -0.26, i.e. mirrored with the old
+       body_offset_x bug — the "front" markers sat 15 cm BEYOND the real front
+       bumper and showed up in RViz as rover parts floating through walls.
+       Now inset 5 cm from the true chassis edges (+0.21 front, -0.41 rear).
+       Still nominal: re-measure against the physical caster mounts. -->
+  <xacro:caster_marker name="front_left"  x=" 0.16" y=" 0.12"/>
+  <xacro:caster_marker name="front_right" x=" 0.16" y="-0.12"/>
+  <xacro:caster_marker name="rear_left"   x="-0.36" y=" 0.12"/>
+  <xacro:caster_marker name="rear_right"  x="-0.36" y="-0.12"/>
+
+  <!-- ── LiDAR (A1M8) ────────────────────────────────────────────────────── -->
+  <!-- NOTE: cable-forward mount on the new chassis means scan angle-0
+       physically points FORWARD.  No 180° remap is needed here; remove the
+       rpy="0 0 ${pi}" rotation that the previous chassis used. -->
+  <link name="laser_frame">
+    <visual>
+      <geometry><cylinder radius="0.04" length="0.04"/></geometry>
+      <material name="blue"><color rgba="0.0 0.0 1.0 1.0"/></material>
+    </visual>
+    <collision>
+      <geometry><cylinder radius="0.04" length="0.04"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.18"/>
+      <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
+    </inertial>
+  </link>
+  <joint name="lidar_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="laser_frame"/>
+    <origin xyz="${lidar_x} ${lidar_y} ${lidar_height}" rpy="0 0 ${lidar_yaw}"/>
+  </joint>
+
+  <!-- ── BNO085 IMU ──────────────────────────────────────────────────────── -->
+  <!-- Mounted on top deck near the drive-axle center.  Position measured
+       2026-05-22; orientation is identity (chip +X = rover +X) by default.
+       If physical mounting flips Z or Y, the bridge node (arduino_encoder_-
+       twist_bridge) applies the remap via axis_*_src / axis_*_sgn params. -->
+  <link name="imu_link"/>
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="imu_link"/>
+    <origin xyz="${imu_x} ${imu_y} ${imu_z}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ── ToF safety belt (6x VL53L1X) ───────────────────────────────────── -->
+  <!--
+    ►►► EDIT THESE NUMBERS TO YOUR MEASUREMENTS.  Every value below is what we
+        derived on paper; each is marked VERIFY until you confirm it against
+        the built rover.  RangeSensorLayer places each cone using TF, so a
+        frame that lies about where a sensor is will mark obstacles in the
+        wrong place — and nothing will look broken.
+
+    HEIGHTS: measure floor -> LENS CENTRE (not the board edge, not a mounting
+    hole).  Then subtract the 0.06 m base_link height, because base_link sits
+    at the drive axle, one wheel radius off the ground:
+
+        z_here = (lens height above floor) - 0.06
+
+    X REFERENCE: base_link is the drive-axle midpoint.  Chassis front face is
+    +0.21, rear face is -0.41.  Y is +left.
+
+    ORIENTATION: yaw 0 = straight ahead, +yaw = left.  The down-looker uses
+    PITCH (rotation about Y, +ve tips the beam DOWN).  A 180 deg yaw aims a
+    sensor straight back.
+  -->
+  <!--
+    ►►► ENTER YOUR TAPE-MEASURE NUMBERS BELOW, IN METRES AND DEGREES. ◄◄◄
+    The xacro does all the conversion.  Do not subtract anything yourself.
+
+    HEIGHTS (*_floor_h): floor up to the LENS CENTRE, exactly as you measured
+      it.  The "- wheel_radius" further down is NOT something you apply — it is
+      the code converting your floor measurement into base_link's frame,
+      because base_link sits at the drive axle, one wheel radius (6 cm) off the
+      ground.  Measure from the floor; the file handles the rest.
+
+    FORWARD/BACK (*_x): distance from the DRIVE AXLE, +ve toward the front.
+      The front face of the chassis is +0.21, the rear face is -0.41.  If it is
+      easier, measure back from the front face and write
+      ${0.21 - <your measurement>}.
+
+    SIDEWAYS (*_y): distance from the centreline, as a positive number.  The
+      left/right signs are applied automatically.
+
+    ANGLES (*_deg): plain degrees.  Yaw 0 = straight ahead, 180 = straight
+      back, +45 = angled toward the LEFT.  Pitch is how far the beam tips DOWN.
+  -->
+  <xacro:property name="tof_belt_floor_h"   value="0.135"/>  <!-- VERIFY: front pair + rear, floor to lens -->
+  <xacro:property name="tof_corner_floor_h" value="0.155"/>  <!-- VERIFY: the two 45 deg corners -->
+  <xacro:property name="tof_down_floor_h"   value="0.365"/>  <!-- VERIFY: the down-looker -->
+
+  <xacro:property name="tof_front_x"    value="0.21"/>     <!-- VERIFY: chassis front face -->
+  <xacro:property name="tof_rear_x"     value="-0.41"/>    <!-- VERIFY: chassis rear face -->
+  <xacro:property name="tof_front_y"    value="0.10"/>     <!-- VERIFY: forward pair, so 20 cm apart -->
+  <xacro:property name="tof_corner_y"   value="0.1575"/>   <!-- VERIFY: chassis half-width -->
+  <xacro:property name="tof_corner_deg" value="45"/>       <!-- VERIFY: corners, angled outward -->
+  <!-- 43 deg, not the 40 we designed for.  MEASURED, not assumed: on bare floor
+       the down-looker read 0.538 m along its beam, and asin(0.365 / 0.538) =
+       42.7 deg.  Re-derive the same way after any remount:
+           tilt = asin(lens height / range read on clear, flat floor)
+       Consequence of the extra 3 deg: the beam lands 0.39 m ahead instead of
+       0.45 m, so slightly less warning before a drop.  Accepted 2026-09-24. -->
+  <xacro:property name="tof_down_deg"   value="43"/>       <!-- MEASURED -->
+
+  <!-- ── conversions — nothing to edit below this line ─────────────────────── -->
+  <!-- base_link is at the drive axle, wheel_radius above the floor (see the
+       base_footprint joint at the top of this file), so every child link's z
+       is measured from THERE, not from the ground. -->
+  <xacro:property name="tof_belt_z"     value="${tof_belt_floor_h   - wheel_radius}"/>
+  <xacro:property name="tof_corner_z"   value="${tof_corner_floor_h - wheel_radius}"/>
+  <xacro:property name="tof_down_z"     value="${tof_down_floor_h   - wheel_radius}"/>
+  <xacro:property name="tof_corner_yaw" value="${radians(tof_corner_deg)}"/>
+  <xacro:property name="tof_down_pitch" value="${radians(tof_down_deg)}"/>
+
+  <!-- Frames only: no visual/collision geometry.  These must NOT add to the
+       footprint — the Nav2 `footprint` param is the authority on the rover's
+       outline and these sensors sit inside it. -->
+  <xacro:macro name="tof_sensor" params="name x y z yaw:=0 pitch:=0">
+    <link name="tof_${name}_link"/>
+    <joint name="tof_${name}_joint" type="fixed">
+      <parent link="base_link"/>
+      <child  link="tof_${name}_link"/>
+      <origin xyz="${x} ${y} ${z}" rpy="0 ${pitch} ${yaw}"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:tof_sensor name="front_left"   x="${tof_front_x}" y="${tof_front_y}"   z="${tof_belt_z}"/>
+  <xacro:tof_sensor name="front_right"  x="${tof_front_x}" y="${-tof_front_y}"  z="${tof_belt_z}"/>
+  <xacro:tof_sensor name="corner_left"  x="${tof_front_x}" y="${tof_corner_y}"  z="${tof_corner_z}"
+                    yaw="${tof_corner_yaw}"/>
+  <xacro:tof_sensor name="corner_right" x="${tof_front_x}" y="${-tof_corner_y}" z="${tof_corner_z}"
+                    yaw="${-tof_corner_yaw}"/>
+  <xacro:tof_sensor name="down"         x="${tof_front_x}" y="0"                z="${tof_down_z}"
+                    pitch="${tof_down_pitch}"/>
+  <xacro:tof_sensor name="rear"         x="${tof_rear_x}"  y="0"                z="${tof_belt_z}"
+                    yaw="${pi}"/>
+
+  <!-- Flat companion frame for the down-looker.  tof_down_filter projects the
+       tilted beam's hit point onto the floor plane and republishes on THIS
+       frame, because RangeSensorLayer is 2D: given the real 43-deg-pitched
+       frame it would place the mark at the full slant range and put obstacles
+       further away than they are.  Same x/y as the sensor, no pitch. -->
+  <xacro:tof_sensor name="down_proj"    x="${tof_front_x}" y="0"                z="${tof_belt_z}"/>
+
+</robot>

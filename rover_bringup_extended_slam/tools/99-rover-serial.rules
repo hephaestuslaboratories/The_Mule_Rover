@@ -1,0 +1,34 @@
+# Stable names for the rover's USB serial devices.
+#
+# INSTALL ON THE JETSON (this file is the master copy; the rules themselves
+# live outside the repo and would otherwise be unrecoverable):
+#
+#     sudo cp 99-rover-serial.rules /etc/udev/rules.d/
+#     sudo udevadm control --reload-rules && sudo udevadm trigger
+#     ls -l /dev/ttyMOTOR /dev/ttyLIDAR
+#
+# WHY THIS EXISTS
+#   ttyACM numbers are handed out in enumeration order.  With more than one
+#   Espressif board on the bus (they all enumerate as "USB JTAG serial debug
+#   unit") the motor/IMU bridge can come up as ttyACM1 one day and ttyACM0 the
+#   next, and rover_bringup.launch.py would open the wrong device with nothing
+#   in any log naming the cause.
+#
+#   Matching on serial number instead makes the name follow the hardware.  The
+#   ESP32-S3 reports its MAC address as the USB serial string, which is unique
+#   and printed in esptool's flash-id output.
+#
+# ID_MM_DEVICE_IGNORE keeps ModemManager from probing these ports with AT
+# commands on hotplug — it has been observed writing a line per second into an
+# ESP32 serial port, and it can inject bytes into the MOTOR link just as easily.
+
+# Replace the placeholder with your motor/IMU ESP32-S3's serial.  Find it with:
+#     udevadm info -q property -n /dev/ttyACM0 | grep ID_SERIAL_SHORT
+SUBSYSTEM=="tty", ATTRS{serial}=="PUT-YOUR-MOTOR-ESP32-SERIAL-HERE", SYMLINK+="ttyMOTOR"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="ttyLIDAR"
+
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# If the board is ever replaced, its MAC changes.  Re-run the udevadm command
+# above and update the rule.

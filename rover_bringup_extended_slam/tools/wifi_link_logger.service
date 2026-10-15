@@ -1,0 +1,11 @@
+[Unit]
+Description=WiFi link flight recorder (writes /var/log/wifi_link.log every 2 s)
+After=NetworkManager.service
+
+[Service]
+ExecStart=/usr/local/bin/wifi_link_logger.sh wlP1p1s0
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

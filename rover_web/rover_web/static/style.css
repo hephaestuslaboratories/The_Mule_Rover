@@ -1,0 +1,172 @@
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+html { height: 100%; }
+body {
+  /* MIN-height, not height.  With `height:100%` + border-box the body was
+     locked to exactly one screen and its bottom padding lived INSIDE that
+     box — so anything taller than the viewport scrolled straight past the
+     padding and hid under the fixed STOP bar.  min-height lets the body grow
+     with its content, so the padding below really is the last thing on the
+     page and nothing can end up trapped behind the button. */
+  min-height: 100%;
+  font-family: -apple-system, "SF Pro", Segoe UI, Roboto, sans-serif;
+  background: #0d1117; color: #e6edf3;
+  display: flex; flex-direction: column;
+  padding-bottom: calc(74px + env(safe-area-inset-bottom));
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+}
+.hidden { display: none !important; }
+
+header { padding: 10px 12px 6px; }
+.title-row { display: flex; align-items: center; gap: 8px; }
+h1 { font-size: 18px; letter-spacing: 3px; color: #58a6ff; margin-right: auto; }
+.chips { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.chip {
+  font-size: 10px; font-weight: 700; letter-spacing: 1px;
+  padding: 3px 8px; border-radius: 10px;
+  background: #21262d; color: #7d8590; border: 1px solid #30363d;
+}
+.chip.on  { background: #12351f; color: #3fb950; border-color: #2ea043; }
+.chip.off { background: #3d1418; color: #f85149; border-color: #6e2026; }
+.chip.mode { background: #1b2a41; color: #58a6ff; border-color: #2f5a91; }
+.chip.busy { background: #3a2d10; color: #d29922; border-color: #9e6a03; }
+
+#goal-banner {
+  margin: 4px 12px; padding: 8px 10px; border-radius: 8px;
+  background: #1b2a41; border: 1px solid #2f5a91;
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 13px;
+}
+
+#map-wrap {
+  position: relative; margin: 6px 12px;
+  background: #161b22; border: 1px solid #30363d; border-radius: 10px;
+  overflow: hidden;
+  /* body is a flex column.  With the default flex-shrink:1 the tall NAV panel
+     squeezed this box down to a sliver — it only looked right in the SLAM tab
+     because that panel is short.  Fixed basis = same map height in every tab. */
+  flex: 0 0 44vh;
+  min-height: 240px;
+}
+/* Tap ⤢ to blow the map up to the whole screen — the only way to really read
+   it on a phone.  Tap again to come back. */
+#map-wrap.expanded {
+  position: fixed; margin: 0; flex: none; z-index: 45;
+  top: 8px; left: 8px; right: 8px;
+  bottom: calc(66px + env(safe-area-inset-bottom));
+}
+#map-canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+#map-empty {
+  position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center;
+  color: #444c56; font-size: 13px; letter-spacing: 2px;
+}
+#map-expand {
+  position: absolute; top: 6px; right: 6px; z-index: 2;
+  width: 34px; height: 34px; padding: 0; font-size: 15px; line-height: 1;
+  background: rgba(13, 17, 23, 0.75); border: 1px solid #30363d;
+  color: #7d8590; border-radius: 8px;
+}
+#map-expand:active { color: #58a6ff; border-color: #2f5a91; }
+
+/* Desktop: stop the map from drowning in a 2000px-wide dark field. */
+@media (min-width: 760px) {
+  header, #goal-banner, #map-wrap, #tabs, main, #log-panel {
+    max-width: 760px; margin-left: auto; margin-right: auto;
+  }
+  #btn-estop { left: 50%; right: auto; width: 736px; transform: translateX(-50%); }
+}
+
+#tabs { display: flex; margin: 4px 12px 0; gap: 6px; }
+.tab {
+  flex: 1; padding: 9px 0; font-size: 12px; font-weight: 700;
+  letter-spacing: 2px; color: #7d8590;
+  background: #161b22; border: 1px solid #30363d;
+  border-radius: 8px 8px 0 0;
+}
+.tab.active { color: #58a6ff; background: #1b2a41; border-color: #2f5a91; }
+
+main { flex: 1; margin: 0 12px; }
+.panel {
+  background: #161b22; border: 1px solid #30363d; border-top: none;
+  border-radius: 0 0 10px 10px; padding: 14px;
+}
+label { display: block; font-size: 11px; letter-spacing: 1px;
+        color: #7d8590; margin: 10px 0 4px; text-transform: uppercase; }
+.row { display: flex; gap: 8px; align-items: center; }
+.row.spread { justify-content: space-between; }
+.session-label { font-size: 14px; }
+input[type=text], select {
+  flex: 1; min-width: 0; padding: 11px 10px; font-size: 16px;
+  background: #0d1117; color: #e6edf3;
+  border: 1px solid #30363d; border-radius: 8px;
+}
+button {
+  font-size: 13px; font-weight: 700; letter-spacing: 1px;
+  padding: 11px 14px; border-radius: 8px; border: 1px solid #30363d;
+  background: #21262d; color: #e6edf3;
+}
+button:disabled { opacity: 0.4; }
+button.primary   { background: #1f6feb; border-color: #388bfd; }
+button.secondary { background: #21262d; border-color: #388bfd; color: #58a6ff; }
+button.danger    { background: #6e2026; border-color: #f85149; }
+button.wide { width: 100%; margin-top: 12px; }
+button.mini { padding: 6px 10px; font-size: 11px; }
+.hint { font-size: 12px; color: #7d8590; margin: 8px 0; line-height: 1.4; }
+.hint.center { text-align: center; }
+
+#joy-block { margin: 12px 0 4px; }
+#joystick {
+  width: 190px; height: 190px; margin: 0 auto; border-radius: 50%;
+  background: radial-gradient(circle, #1b2a41 0%, #161b22 75%);
+  border: 2px solid #2f5a91; position: relative; touch-action: none;
+}
+#joy-knob {
+  width: 64px; height: 64px; border-radius: 50%;
+  background: #388bfd; border: 2px solid #79c0ff;
+  position: absolute; left: 61px; top: 61px; pointer-events: none;
+}
+
+#places-list { list-style: none; }
+#places-list li {
+  display: flex; align-items: center; gap: 8px;
+  background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+  padding: 10px 12px; margin-bottom: 6px; font-size: 15px;
+}
+#places-list .go { flex: 1; text-align: left; background: none;
+                   border: none; color: #e6edf3; font-size: 15px;
+                   padding: 0; font-weight: 600; }
+#places-list .meta { font-size: 11px; color: #7d8590; }
+#places-list .del { background: none; border: none; color: #f85149;
+                    font-size: 16px; padding: 2px 6px; }
+
+/* Slimmer than before (was 16px/18px) — still an unmissable full-width
+   target, but it gives ~15px of screen back on a phone.  Keep it in sync
+   with body's padding-bottom above, which reserves its clearance. */
+#btn-estop {
+  position: fixed; left: 12px; right: 12px;
+  bottom: calc(10px + env(safe-area-inset-bottom));
+  padding: 11px; font-size: 16px; letter-spacing: 4px;
+  background: #b62324; border: 2px solid #ff7b72; color: #fff;
+  border-radius: 12px; z-index: 50;
+  box-shadow: 0 -8px 16px rgba(13, 17, 23, 0.9);
+}
+
+#log-panel { margin: 8px 12px 4px; font-size: 11px; color: #7d8590; }
+#log-panel summary { letter-spacing: 2px; padding: 4px 0; }
+#log-body {
+  max-height: 160px; overflow-y: auto; white-space: pre-wrap;
+  background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+  padding: 8px; font-family: ui-monospace, Menlo, monospace; font-size: 10px;
+}
+
+#toasts { position: fixed; top: 10px; left: 12px; right: 12px; z-index: 100; }
+.toast {
+  padding: 10px 12px; border-radius: 8px; margin-bottom: 6px;
+  font-size: 13px; font-weight: 600; opacity: 0.97;
+  background: #21262d; border: 1px solid #30363d;
+}
+.toast.ok    { background: #12351f; border-color: #2ea043; color: #3fb950; }
+.toast.error { background: #3d1418; border-color: #f85149; color: #ff7b72; }
+.toast.warn  { background: #3a2d10; border-color: #9e6a03; color: #d29922; }
+.toast.info  { background: #1b2a41; border-color: #2f5a91; color: #79c0ff; }

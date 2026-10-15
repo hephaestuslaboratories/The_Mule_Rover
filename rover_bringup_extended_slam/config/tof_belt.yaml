@@ -1,0 +1,163 @@
+ # ─────────────────────────────────────────────────────────────────────────────
+# tof_belt.yaml — the ToF safety belt's channel map and per-sensor limits.
+#
+# ►►► THIS IS ONE OF THE TWO FILES YOU EDIT.  The other is rover.urdf.xacro
+#     (mount positions).  Nothing about the belt is hard-coded in the node.
+#
+# EDIT CHECKLIST — everything marked ◄◄◄ VERIFY is a guess until you confirm it
+#   1. channel      — from tools/tof_probe.py --watch.  A channel IS a sensor's
+#                     identity; every VL53L1X is at 0x29 and the mux is the only
+#                     thing telling them apart.  Getting this wrong puts a real
+#                     obstacle in the wrong place on the costmap.
+#   2. max_range    — the distance past which the FLOOR enters that sensor's
+#                     cone.  Formula: lens height / 0.28.  The 0.28 is
+#                     tan(13.5 deg + 2 deg): half the 27 deg cone, plus 2 deg of
+#                     nose-down pitch so braking or a threshold does not make
+#                     the floor read as an obstacle.
+#                     CONFIRM BY TEST: park on bare floor, nothing in front,
+#                     run tof_probe.py --live.  Whatever distance the floor
+#                     shows up at, set max_range BELOW it.
+#   3. frame_id     — must match the link name in rover.urdf.xacro exactly, or
+#                     RangeSensorLayer has no TF and silently marks nothing.
+# ─────────────────────────────────────────────────────────────────────────────
+
+tof_belt:
+  ros__parameters:
+
+    # ── bus ──────────────────────────────────────────────────────────────────
+    # /dev/i2c-7 == 40-pin header pins 3 (SDA) and 5 (SCL) on an Orin Nano,
+    # confirmed via `i2cdetect -l` (c250000.i2c).  Mux answers at 0x70.
+    i2c_bus: 7
+    mux_address: 0x70
+
+    # ── ranging ──────────────────────────────────────────────────────────────
+    # 10 -> 20 Hz (2026-09-25).  The sensors free-run at ~26 Hz with a 33 ms
+    # budget, so at 10 Hz we were throwing away more than half the data and
+    # adding up to 100 ms of latency for nothing.  Each cycle is ~12 I2C
+    # transactions; at 20 Hz that is 240/s on a 100 kHz bus — still idle.
+    # 20 -> 15 Hz, paired with timing_budget_ms below.  A 50 ms budget plus the
+    # node's 5 ms gap caps the sensors at ~18 measurements/s, so polling faster
+    # just finds no fresh data and wastes I2C traffic.
+    rate_hz: 15.0             # 2.1 cm of travel per cycle at 0.32 m/s
+    # 33 -> 50 ms (2026-09-25).  The budget is how long the sensor integrates
+    # light for ONE measurement — camera shutter speed.  Longer collects more
+    # photons, so faint returns become detectable: matte black reflects ~5-10%
+    # of 940 nm where a white wall returns ~88%, and at 33 ms a black cushion
+    # fell below the signal threshold, was reported as SIGNAL_FAIL, and the
+    # node correctly-but-uselessly published "clear".
+    # Cost: ~26 -> ~18 measurements/s.  At 0.32 m/s the rover moves 1.6 cm
+    # during one measurement, so smearing is not a concern at these speeds.
+    # ONLY these values are legal (the driver carries a lookup table, it does
+    # not compute the registers): 15/20/33/50/100/200/500.  Anything else and
+    # the sensor fails to init and gets quarantined.
+    timing_budget_ms: 50      # allowed: 15/20/33/50/100/200/500 (short mode)
+    distance_mode: 1          # 1 = short (max ~1.3 m, ambient-light immune)
+                              # 2 = long  (max ~4 m, noisier under sunlight)
+    field_of_view: 0.4712     # 27 deg, the full 16x16 detector array
+
+    # ROI: shrinking one axis narrows the cone on that axis.  ONLY change this
+    # if the floor test fails and you cannot solve it with max_range.  Set the
+    # NARROW axis vertical — and note which axis that is depends on how the
+    # chip sits in its package, so test with a 16x4 and watch which way the
+    # cone shrinks.  16x16 = full cone = leave it alone.
+    roi_x: 16
+    roi_y: 16
+
+    # ── fault handling ───────────────────────────────────────────────────────
+    # The belt is additive: one bad sensor must never take the others down.
+    # After this many consecutive failures a channel is quarantined, reported
+    # on /rover/tof_status, and skipped.  It is retried every retry_s in case
+    # it was a glitch rather than a dead board.
+    fault_strikes: 10
+    quarantine_retry_s: 30.0
+
+    # ── the belt ─────────────────────────────────────────────────────────────
+    # Order here is only the polling order.  Names must match the per-sensor
+    # blocks below and the frame names in the URDF.
+    sensors:
+      - front_left
+      - front_right
+      - corner_left
+      - corner_right
+      - down
+      - rear
+
+    # min_range 0.04 is the VL53L1X's honest floor; anything closer is reported
+    # AS 0.04 rather than dropped, because something is definitely there.
+
+    front_left:
+      channel: 7              # ◄◄◄ VERIFY against tof_probe.py --watch
+      frame_id: tof_front_left_link
+      topic: /tof/front_left
+      min_range: 0.04
+      max_range: 0.47         # ◄◄◄ VERIFY — 13.5 cm lens height / 0.28
+    front_right:
+      channel: 4              # ◄◄◄ VERIFY
+      frame_id: tof_front_right_link
+      topic: /tof/front_right
+      min_range: 0.04
+      max_range: 0.47         # ◄◄◄ VERIFY
+    corner_left:
+      channel: 3              # ◄◄◄ VERIFY
+      frame_id: tof_corner_left_link
+      topic: /tof/corner_left
+      min_range: 0.04
+      max_range: 0.55         # ◄◄◄ VERIFY — 15.5 cm lens height / 0.28
+    corner_right:
+      channel: 0              # ◄◄◄ VERIFY
+      frame_id: tof_corner_right_link
+      topic: /tof/corner_right
+      min_range: 0.04
+      max_range: 0.55         # ◄◄◄ VERIFY
+    down:
+      channel: 1              # ◄◄◄ VERIFY
+      frame_id: tof_down_link
+      topic: /tof/down
+      min_range: 0.04
+      # The down-looker is NOT capped like the others: it is SUPPOSED to see
+      # the floor, at about 0.57 m along its beam (36.5 cm height, 40 deg tilt).
+      # That is why its output must go through the filter node and must NOT be
+      # fed to RangeSensorLayer raw — raw, it would mark a permanent phantom
+      # obstacle 0.45 m ahead of the rover, forever.
+      max_range: 1.00
+    rear:
+      channel: 2             # ◄◄◄ VERIFY — channels 5 and 6 are unused
+      frame_id: tof_rear_link
+      topic: /tof/rear
+      min_range: 0.04
+      max_range: 0.47         # ◄◄◄ VERIFY — only needs to cover BackUp's 0.30 m
+
+# ─────────────────────────────────────────────────────────────────────────────
+# tof_down_filter — the only consumer of /tof/down.
+#
+# The down-looker always sees the floor, so its raw range is meaningless to a
+# costmap.  This node turns "shorter than the floor baseline" into an obstacle
+# and republishes it on a flat frame that RangeSensorLayer can use.
+#
+# THESE TWO NUMBERS ARE THE ONES TO TUNE:
+#   floor_baseline_m      what it reads on clear floor.  MEASURE IT:
+#                         ros2 topic echo /tof/down --field range
+#   obstacle_threshold_m  flag anything below this.  Sits just under the noise
+#                         floor, since the reading oscillates upward from the
+#                         baseline but never below it.
+#
+# An object shortens the reading by about 1.5x its height (height / sin 43),
+# so a 0.01 m gap between these two catches objects taller than ~7 mm.
+# Tighten the gap and floor noise starts firing; widen it and short objects
+# are missed.
+# ─────────────────────────────────────────────────────────────────────────────
+tof_down_filter:
+  ros__parameters:
+    input_topic: /tof/down
+    output_topic: /tof/down_obstacle
+    output_frame: tof_down_proj_link      # must match rover.urdf.xacro
+    floor_baseline_m: 0.53                # MEASURED on clear floor
+    obstacle_threshold_m: 0.52            # flag below this
+    tilt_deg: 43.0                        # must match tof_down_deg in the URDF
+    # A drop is a missing return or a much longer one.  A black doormat can
+    # also swallow the beam, hence the debounce below.
+    drop_margin_m: 0.08
+    # Readings in a row before anything is believed, in either direction.
+    # At 10 Hz, 3 = 0.3 s.
+    consecutive_readings: 3
+    field_of_view: 0.4712

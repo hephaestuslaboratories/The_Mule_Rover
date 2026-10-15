@@ -1,0 +1,145 @@
+<!--
+  navigate_w_smoothing_and_recovery.xml
+  ───────────────────────────────────────────────────────────────────────────
+  Rover behaviour tree: the stock Nav2 "navigate_to_pose with replanning and
+  recovery" tree, PLUS a SmoothPath step.
+
+  WHY: the planner is NavFn, which plans on the costmap grid and emits paths
+  that staircase in 45-degree steps.  Regulated Pure Pursuit then follows that
+  staircase faithfully, which reads as the rover weaving ("driving drunk")
+  down a straight hallway.  smoother_server was already configured and running
+  in nav2_params.yaml but the stock tree never called it — this tree does.
+
+  FAIL-SAFE BY DESIGN: SmoothPath sits inside a Fallback with AlwaysSuccess,
+  and reads/writes the same {path} key.  If smoothing fails or times out, the
+  unsmoothed path from ComputePathToPose survives in {path} and navigation
+  carries on exactly as before.  Smoothing can never break navigation.
+
+  Everything else is stock: 6 recovery cycles, 1 Hz replanning, costmap-clear
+  retries around plan and follow, and the RoundRobin recovery list
+  (clear -> spin -> wait -> back up).
+
+  To use, in nav2_params.yaml under bt_navigator -> navigate_to_pose:
+    bt_xml_filename: "<abs path to this file>"
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <!-- 6 -> 12 (2026-09-25).  Each retry consumes ONE action from the
+         RoundRobin, and there are now 6 actions, so 6 retries was a single
+         pass through the ladder.  12 gives two full passes — enough for the
+         sweep to map a low obstacle, retreat, try again, and only then start
+         clearing and giving up.  Budget roughly 20-30 s per pass. -->
+    <RecoveryNode number_of_retries="12" name="NavigateRecovery">
+
+      <PipelineSequence name="NavigateWithReplanning">
+
+        <!-- 1.0 -> 2.0 Hz (2026-08-19).  This gates how often a NEW path is
+             requested.  At 1 Hz and 0.25 m/s the rover travelled 25 cm before it
+             could act on anything that changed — the single largest source of
+             "it takes too long to decide".  NavFn is cheap (2D potential field),
+             so 2 Hz is affordable; it would NOT be with Smac.
+             Paired with global_costmap update_frequency 3.0 — replanning faster
+             than the costmap updates just re-plans on identical data.
+
+             2.0 -> 4.0 Hz (2026-09-25, for the ToF belt).  The belt only sees
+             0.47 m ahead, so from first detection to contact is ~1.5 s at
+             0.32 m/s.  At 2 Hz that allowed 3 chances to produce a path around
+             a low obstacle; at 4 Hz it is 6.  global_costmap update_frequency
+             raised 3.0 -> 4.0 to match, or the extra replans see stale data.
+             WATCH /tf: this Jetson signals CPU exhaustion by starving it
+             (S7.4).  Below ~79 Hz, put BOTH of these back. -->
+        <RateController hz="4.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <Sequence name="PlanThenSmooth">
+              <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+              <Fallback name="SmoothIfPossible">
+                <SmoothPath unsmoothed_path="{path}"
+                            smoothed_path="{path}"
+                            smoother_id="simple_smoother"
+                            max_smoothing_duration="0.5"
+                            check_for_collisions="true"/>
+                <!-- smoothing failed: keep the raw path and continue -->
+                <AlwaysSuccess/>
+              </Fallback>
+            </Sequence>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context"
+                                service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+
+        <!-- 1 -> 3 (2026-09-25): re-attempt following, clearing the LOCAL
+             costmap between tries, before escalating to the full recovery
+             ladder.  A transient ToF mark often clears on its own within a
+             second, and that is much cheaper than a backup-and-spin. -->
+        <RecoveryNode number_of_retries="3" name="FollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <!-- WAS ClearEntireCostmap (local).  Changed 2026-09-25 because it
+               fought the ToF belt: the belt is the ONLY sensor that can see a
+               low obstacle, and nothing re-marks one until the rover is back
+               within 0.47 m of it — so wiping the local costmap here erased
+               the only record of the object, the planner routed straight
+               through it again, and the rover crept forward and tapped it.
+               With 3 retries it wiped it up to three times per approach.
+               A Wait gives a transient mark time to clear on its own instead.
+               Phantoms are still handled: ClearingActions in the RoundRobin
+               below, and the 3 m rolling window drops anything left behind. -->
+          <Wait wait_duration="1"/>
+        </RecoveryNode>
+
+      </PipelineSequence>
+
+      <!-- Recovery branch: abandon immediately if a new goal arrives -->
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <!-- RECOVERY LADDER, reordered and re-sped for THIS rover.
+
+             Stock Nav2 backs up at 0.05 m/s and spins from 0.10 rad/s.  Both
+             are BELOW this drivetrain's stiction floor (~0.3 rad/s rotating;
+             0.05 m/s is ~10 PWM of feedforward), so the stock recovery just
+             taps the motors without moving — which is exactly how it behaved.
+             Speeds below are above the floor so the rover actually MOVES.
+
+             Reordered too: retreat BEFORE spinning.  Backing up along space
+             the rover just occupied is provably clear and creates the room a
+             spin needs; spinning first in a tight spot just re-triggers
+             "Collision Ahead - Exiting Spin". -->
+        <RoundRobin name="RecoveryActions">
+          <!-- SWEEP FIRST (2026-09-25, with the ToF belt).  A low obstacle is
+               visible ONLY to the belt, whose cones reach 0.47 m and are 27 deg
+               wide — one static look sees a slice of an object, not its width,
+               so the planner routes around a sliver and clips the rest.
+               Rotating sweeps those cones across the object and every reading
+               is placed by TF at its true position, so the costmap accumulates
+               the real outline.  In other words: this IS the scan, and it needs
+               no servo and no new code.
+               +/- 0.5 rad (29 deg) either side, ending on the original heading.
+               Deliberately small: a 1.57 spin points the belt AWAY from the
+               thing we are trying to measure. -->
+          <Sequence name="SweepScan">
+            <Spin spin_dist="-0.5"/>
+            <Spin spin_dist="1.0"/>
+            <Spin spin_dist="-0.5"/>
+          </Sequence>
+          <BackUp backup_dist="0.40" backup_speed="0.12"/>
+          <!-- CLEARING DEMOTED from first to third (2026-09-25).  It wipes
+               every ToF mark, and unlike a LiDAR obstacle nothing will ever
+               re-mark a low object until the rover drives back within 0.47 m of
+               it — so clearing first meant: map the shoe, erase the shoe,
+               replan straight through the shoe, hit the shoe.  Kept in the
+               ladder as a genuine escape hatch for phantom marks, just not as
+               the FIRST thing tried. -->
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree"
+                                service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree"
+                                service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <Spin spin_dist="1.57"/>
+          <BackUp backup_dist="0.70" backup_speed="0.12"/>
+          <Wait wait_duration="3"/>
+        </RoundRobin>
+      </ReactiveFallback>
+
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Rover Cockpit</title>
+<link rel="stylesheet" href="/static/style.css?v=3">
+</head>
+<body>
+<header>
+  <div class="title-row">
+    <h1>ROVER</h1>
+    <span id="conn" class="chip off">LINK</span>
+    <span id="mode-badge" class="chip mode">IDLE</span>
+  </div>
+  <div class="chips">
+    <span id="st-stack" class="chip off">STACK</span>
+    <span id="st-loc"   class="chip off">LOC</span>
+    <span id="st-nav2"  class="chip off">NAV2</span>
+    <span id="st-map"   class="chip off">MAP</span>
+    <span id="st-busy"  class="chip busy hidden">WORKING…</span>
+  </div>
+</header>
+
+<div id="goal-banner" class="hidden">
+  <span id="goal-text"></span>
+  <button id="btn-cancel-goal" class="mini danger">CANCEL</button>
+</div>
+
+<div id="map-wrap">
+  <canvas id="map-canvas"></canvas>
+  <div id="map-empty">no map yet</div>
+  <button id="map-expand" title="expand map to full screen">⤢</button>
+</div>
+
+<!-- Joystick lives under the map, shared by SLAM (manual mapping) and NAV
+     (drive to a new spot, then save it). Hidden while exploring or idle. -->
+<div id="joy-block" class="hidden">
+  <div id="joystick"><div id="joy-knob"></div></div>
+  <p class="hint center">hold &amp; drag to drive — release stops · grabbing the
+  stick cancels any active goal</p>
+</div>
+
+<nav id="tabs">
+  <button data-tab="slam" class="tab active">SLAM</button>
+  <button data-tab="nav"  class="tab">NAV</button>
+  <button data-tab="voice" class="tab">VOICE</button>
+</nav>
+
+<main>
+  <!-- ------------------------------------------------ SLAM tab -->
+  <section id="tab-slam" class="panel">
+    <div id="slam-idle">
+      <label>New map name</label>
+      <div class="row">
+        <input id="slam-name" type="text" placeholder="e.g. house_full"
+               autocomplete="off" autocapitalize="off">
+        <button id="btn-start-slam" class="primary">START SLAM</button>
+      </div>
+      <p class="hint">Starts a fresh mapping session. Drive with the
+      joystick (telemetry) or use autonomous exploration. Save when done.</p>
+    </div>
+    <div id="slam-active" class="hidden">
+      <div class="row spread">
+        <span class="session-label">Mapping: <b id="slam-session"></b></span>
+        <button id="btn-save-map" class="primary">SAVE MAP</button>
+      </div>
+      <div class="row">
+        <button id="btn-explore-start" class="secondary">START EXPLORE</button>
+        <button id="btn-explore-stop"  class="secondary hidden">STOP EXPLORE</button>
+      </div>
+      <p class="hint" id="explore-hint">Autonomous frontier exploration:
+      the rover maps on its own until no frontiers remain.</p>
+      <button id="btn-stop-slam" class="danger wide">STOP SLAM SESSION</button>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------ NAV tab -->
+  <section id="tab-nav" class="panel hidden">
+    <div id="nav-idle">
+      <label>Select map</label>
+      <div class="row">
+        <select id="nav-map-select"></select>
+        <button id="btn-start-nav" class="primary">START NAV</button>
+      </div>
+      <p class="hint">Loads the saved map and localizes on it. Place the
+      rover at its usual start spot (or set pose in RViz if needed).</p>
+      <div class="row">
+        <input id="chk-autoinit" type="checkbox" checked>
+        <label for="chk-autoinit" class="hint">Auto pose init — resume last
+        position when starting on the same map</label>
+      </div>
+    </div>
+    <div id="nav-active" class="hidden">
+      <div class="row spread">
+        <span class="session-label">Map: <b id="nav-session"></b></span>
+        <button id="btn-stop-nav" class="danger">STOP NAV</button>
+      </div>
+      <p class="hint" id="autoinit-line"></p>
+      <label>Go to saved place</label>
+      <div class="row">
+        <select id="place-select"></select>
+        <button id="btn-goto" class="primary">GO</button>
+        <button id="btn-del-place" class="mini danger" title="delete selected place">✕</button>
+      </div>
+      <label>Fix localization — rover is physically at</label>
+      <div class="row">
+        <select id="pose-select"></select>
+        <button id="btn-set-pose" class="secondary">SET POSE</button>
+      </div>
+      <label>Switch map (restarts localization, ~30 s)</label>
+      <div class="row">
+        <select id="nav-map-switch"></select>
+        <button id="btn-switch-map" class="secondary">SWITCH</button>
+      </div>
+      <label>Save current location as</label>
+      <div class="row">
+        <input id="place-name" type="text" placeholder="e.g. kitchen"
+               autocomplete="off" autocapitalize="off">
+        <button id="btn-save-place" class="primary">SAVE</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------ VOICE tab -->
+  <section id="tab-voice" class="panel hidden">
+    <p class="hint">Voice command mode is coming in a later phase.
+    It will listen for saved place names ("rover, go to the kitchen")
+    and requires HTTPS for microphone access. The place store and fuzzy
+    name matching are already built for it.</p>
+  </section>
+</main>
+
+<button id="btn-estop">STOP</button>
+
+<p class="hint center" id="uptime-line"></p>
+
+<details id="settings-panel">
+  <summary>settings</summary>
+  <div class="row">
+    <input id="chk-runlogger" type="checkbox" checked>
+    <label for="chk-runlogger" class="hint">Run logger — save each run to
+    last_run_log.txt (applies at next start)</label>
+  </div>
+  <div class="row">
+    <input id="chk-logpanel" type="checkbox">
+    <label for="chk-logpanel" class="hint">Live system log in app</label>
+  </div>
+</details>
+
+<details id="log-panel" class="hidden">
+  <summary>system log</summary>
+  <pre id="log-body"></pre>
+</details>
+
+<div id="toasts"></div>
+<script src="/static/app.js?v=3"></script>
+</body>
+</html>
